@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ssh-manager-skill"
+version = "2.0.0"
+description = "Persistent SSH session manager: local daemon, key auth, CJK-safe streaming"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "ADS Jack (fmys2010)" }]
+dependencies = ["paramiko>=3.0"]
+keywords = ["ssh", "paramiko", "daemon", "cli", "agent-skill"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/fmys2010/SSH-Manager"
+Repository = "https://github.com/fmys2010/SSH-Manager"
+
+[project.scripts]
+ssh-manager = "ssh_manager.cli:main"
+
+[tool.setuptools]
+packages = ["ssh_manager"]
+package-dir = { "" = "scripts" }
+
+[tool.pytest.ini_options]
+testpaths = ["scripts"]

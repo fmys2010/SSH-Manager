@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Test scratch (created by the test suite)
+scripts/.test_state_*/
+scripts/.test_idle_state_*/
+.sshm_*/
+
+# Local tooling / session state (never part of the project)
+.omo/
+.codegraph/*
+!.codegraph/.gitignore
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
