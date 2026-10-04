@@ -13,6 +13,7 @@ Design notes
 
 import base64
 import getpass
+import hashlib
 import os
 import stat
 import struct
@@ -34,22 +35,75 @@ class AuthError(Exception):
 
 # -- host keys -----------------------------------------------------------------
 
-def configure_host_keys(client, known_hosts=None, no_host_key_check=False):
-    """Apply the host-key policy to a client. Returns the effective mode."""
+def configure_host_keys(client, known_hosts=None, no_host_key_check=False,
+                        accept_host_key=False):
+    """Apply the host-key policy to a client.
+
+    Returns the RecordingRejectPolicy in strict mode (so the caller can report
+    the fingerprint of the rejected key), else None.
+
+    ``accept_host_key`` still loads known_hosts, so a *changed* key is rejected;
+    only a missing key is accepted (and later persisted).
+    """
     if no_host_key_check:
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        return "disabled"
-    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        return None
+    if accept_host_key:
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.load_system_host_keys()
+        # The file may not exist yet - we are about to create it.
+        if known_hosts and os.path.isfile(os.path.expanduser(known_hosts)):
+            client.load_host_keys(os.path.expanduser(known_hosts))
+        return None
+    policy = RecordingRejectPolicy()
+    client.set_missing_host_key_policy(policy)
     client.load_system_host_keys()
     if known_hosts:
         client.load_host_keys(os.path.expanduser(known_hosts))
-    return "strict"
+    return policy
+
+
+class RecordingRejectPolicy(paramiko.MissingHostKeyPolicy):
+    """Reject an unknown host key but remember it so we can report a fingerprint."""
+
+    def __init__(self):
+        self.key = None
+        self.hostname = None
+
+    def missing_host_key(self, client, hostname, key):
+        self.key = key
+        self.hostname = hostname
+        raise paramiko.SSHException("Server %r not found in known_hosts" % hostname)
+
+
+def fingerprint_sha256(key):
+    """OpenSSH-style fingerprint, e.g. ``SHA256:AbCdEf...`` (no padding)."""
+    digest = hashlib.sha256(key.asbytes()).digest()
+    return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
+
+
+def known_hosts_path(known_hosts=None):
+    """Explicit known_hosts file, or the user's default."""
+    if known_hosts:
+        return os.path.expanduser(known_hosts)
+    return os.path.join(default_ssh_dir(), "known_hosts")
+
+
+def append_known_hosts(path, host, port, key):
+    """Append one host key line, preserving existing (possibly hashed) entries."""
+    directory = os.path.dirname(path)
+    if directory and not os.path.isdir(directory):
+        os.makedirs(directory, exist_ok=True)
+    entry = host if int(port) == 22 else "[%s]:%d" % (host, int(port))
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("%s %s %s\n" % (entry, key.get_name(), key.get_base64()))
 
 
 def unknown_host_hint(host, port):
     """Actionable message shown when strict host-key checking rejects a host."""
     return (
-        "host key verification failed for %s:%s. Add the host key to known_hosts, e.g.\n"
+        "host key verification failed for %s:%s. Re-run with --accept-host-key to save "
+        "the fingerprint, add it via\n"
         "  ssh-keyscan -p %s %s >> ~/.ssh/known_hosts\n"
         "or pass --known-hosts <file>, or explicitly disable the check with "
         "--no-host-key-check." % (host, port, port, host)

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ssh-manager-skill"
-version = "2.0.0"
-description = "Persistent SSH session manager: local daemon, key auth, CJK-safe streaming"
+version = "2.1.0"
+description = "Persistent SSH session manager: daemon, key auth, PTY, SFTP, background jobs"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
