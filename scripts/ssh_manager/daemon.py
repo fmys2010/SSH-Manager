@@ -527,7 +527,7 @@ class Daemon(object):
                 session.id, len(command), digest, status), self.state_dir)
         except ConnectionResetError:
             return  # client went away mid-stream
-        except (OSError, socket.error, paramiko.SSHException) as exc:
+        except (OSError, EOFError, socket.error, paramiko.SSHException) as exc:
             self._safe_send(conn, {"type": "error", "message": "exec error: %s" % exc,
                                    "error_code": "exec_error"})
         finally:
@@ -553,7 +553,7 @@ class Daemon(object):
             status = self._run_channel(session, channel, decoders, job.append, timeout,
                                        False, None)
             job.finish("killed" if job.killed else "done", status)
-        except (OSError, socket.error, paramiko.SSHException) as exc:
+        except (OSError, EOFError, socket.error, paramiko.SSHException) as exc:
             job.finish("failed", None, "exec error: %s" % exc)
         finally:
             session.leave_channel()

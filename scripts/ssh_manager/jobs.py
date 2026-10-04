@@ -48,6 +48,15 @@ class Job(object):
             while self._bytes > self.max_bytes and len(self._chunks) > 1:
                 _, _, dropped = self._chunks.pop(0)
                 self._bytes -= len(dropped.encode("utf-8", "replace"))
+            # A single chunk can exceed the whole budget (chan.recv returns up
+            # to 64 KiB), so truncate its tail to keep the cap a hard limit.
+            if self._bytes > self.max_bytes and self._chunks:
+                seq, stream, text = self._chunks[0]
+                encoded = text.encode("utf-8", "replace")
+                if len(encoded) > self.max_bytes:
+                    tail = encoded[-self.max_bytes:].decode("utf-8", "ignore")
+                    self._chunks[0] = [seq, stream, tail]
+                    self._bytes = len(tail.encode("utf-8", "replace"))
             self._updated.notify_all()
 
     def finish(self, status, exit_status=None, error=None):
