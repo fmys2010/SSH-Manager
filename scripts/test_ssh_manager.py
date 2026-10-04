@@ -527,6 +527,23 @@ class TestJobBuffer(unittest.TestCase):
         self.assertEqual(len(chunks), 1)
         self.assertTrue(chunks[0][2].startswith("b"))
 
+    def test_single_oversized_chunk_is_truncated(self):
+        """chan.recv can return one chunk larger than the whole budget."""
+        job = Job("j1", "s1", "cmd", max_bytes=100)
+        job.append("stdout", "x" * 500)
+        chunks, seq = job.snapshot()
+        self.assertEqual(len(chunks), 1)
+        self.assertLessEqual(len(chunks[0][2].encode("utf-8")), 100)
+        self.assertGreater(len(chunks[0][2]), 0)
+
+    def test_truncation_keeps_multibyte_characters_valid(self):
+        job = Job("j1", "s1", "cmd", max_bytes=64)
+        job.append("stdout", "中" * 100)
+        chunks, _seq = job.snapshot()
+        text = chunks[0][2]
+        self.assertLessEqual(len(text.encode("utf-8")), 64)
+        self.assertTrue(text)
+
     def test_finish_wakes_followers(self):
         job = Job("j1", "s1", "cmd", max_bytes=1000)
         seen = []
@@ -816,10 +833,15 @@ class TestBackgroundJobs(unittest.TestCase):
 
     def test_output_buffer_is_bounded(self):
         job_id = self.client.exec_background(self.conn_id, "flood")
-        time.sleep(3.0)
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            _frames, _seq, info = self.client.job_logs(job_id)
+            if info.get("status") != "running":
+                break
+            time.sleep(0.3)
         frames, _seq, info = self.client.job_logs(job_id)
         text = "".join(chunk for _tag, chunk in frames)
-        self.assertLessEqual(len(text.encode("utf-8")), 4096 + 2048)
+        self.assertLessEqual(len(text.encode("utf-8")), 4096)
         self.assertGreater(len(text), 0)
 
     def test_unknown_job(self):
