@@ -5,7 +5,7 @@ import json
 import os
 import time
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 # -- environment variable names ------------------------------------------------
 STATE_DIR_ENV = "SSH_MANAGER_STATE_DIR"
@@ -13,6 +13,9 @@ IDLE_TIMEOUT_ENV = "SSH_MANAGER_IDLE_TIMEOUT"
 PASSWORD_ENV = "SSH_MANAGER_PASSWORD"
 KEY_PASSPHRASE_ENV = "SSH_MANAGER_KEY_PASSPHRASE"
 KEEPALIVE_ENV = "SSH_MANAGER_KEEPALIVE_INTERVAL"
+MAX_CHANNELS_ENV = "SSH_MANAGER_MAX_CHANNELS"
+JOB_BUFFER_ENV = "SSH_MANAGER_JOB_BUFFER_KB"
+LOG_MAX_KB_ENV = "SSH_MANAGER_LOG_MAX_KB"
 
 # -- file names ----------------------------------------------------------------
 STATE_DIR_DEFAULT = os.path.join(os.path.expanduser("~"), ".ssh-manager")
@@ -30,6 +33,11 @@ DRAIN_TIMEOUT = 0.3                  # seconds, select() wait in the exec drain 
 STREAM_READ_TIMEOUT_FACTOR = 3.0     # client read timeout = factor * keepalive interval
 MAX_FRAME_BYTES = 16 * 1024 * 1024   # protocol frame cap (guards against bad clients)
 STALE_LOCK_SECONDS = 30.0            # a start lock older than this is considered stale
+DEFAULT_MAX_CHANNELS = 10            # concurrent channels per SSH connection
+DEFAULT_JOB_BUFFER_KB = 256          # per background job output budget
+DEFAULT_LOG_MAX_KB = 1024            # rotate daemon.log at this size
+LOG_BACKUPS = 3                      # daemon.log.1 .. daemon.log.3
+MAX_JOBS_PER_SESSION = 50            # finished background jobs kept per session
 
 # Windows subprocess flags (no-ops elsewhere)
 DETACHED_PROCESS = getattr(__import__("subprocess"), "DETACHED_PROCESS", 0x00000008)
@@ -58,6 +66,21 @@ def get_keepalive_interval():
         except ValueError:
             pass
     return DEFAULT_KEEPALIVE_INTERVAL
+
+
+def get_max_channels():
+    """Concurrent channel cap per SSH connection."""
+    return _env_int(MAX_CHANNELS_ENV, DEFAULT_MAX_CHANNELS, minimum=1)
+
+
+def get_job_buffer_bytes():
+    """Per background job output budget, in bytes."""
+    return _env_int(JOB_BUFFER_ENV, DEFAULT_JOB_BUFFER_KB, minimum=1) * 1024
+
+
+def get_log_max_bytes():
+    """daemon.log rotation threshold, in bytes."""
+    return _env_int(LOG_MAX_KB_ENV, DEFAULT_LOG_MAX_KB, minimum=1) * 1024
 
 
 def _env_int(name, default, minimum=None):
@@ -122,16 +145,50 @@ def write_json_atomic(path, obj, mode=0o600):
     os.replace(tmp, path)
 
 
+def rotate_log(path, max_bytes):
+    """Shift daemon.log -> .1 -> .2 -> .3 once it exceeds ``max_bytes``."""
+    try:
+        if os.path.getsize(path) < max_bytes:
+            return False
+    except OSError:
+        return False
+    for index in range(LOG_BACKUPS - 1, 0, -1):
+        source = "%s.%d" % (path, index)
+        if os.path.exists(source):
+            try:
+                os.replace(source, "%s.%d" % (path, index + 1))
+            except OSError:
+                pass
+    try:
+        os.replace(path, path + ".1")
+        return True
+    except OSError:
+        return False
+
+
 def log(message, state_dir=None):
-    """Append one line to daemon.log. Never raises."""
+    """Append one line to daemon.log (rotating it when needed). Never raises."""
     try:
         directory = ensure_state_dir(state_dir)
         path = os.path.join(directory, DAEMON_LOG)
+        rotate_log(path, get_log_max_bytes())
         with open(path, "a", encoding="utf-8") as f:
             f.write("[%s] %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), message))
         secure_file(path, 0o600)
     except OSError:
         pass
+
+
+def read_log_tail(path, lines=None):
+    """Return the last ``lines`` lines of a log file (all of it when None)."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except OSError:
+        return ""
+    if lines is None or lines <= 0:
+        return content
+    return "".join(content.splitlines(True)[-lines:])
 
 
 def format_timestamp(epoch_seconds):

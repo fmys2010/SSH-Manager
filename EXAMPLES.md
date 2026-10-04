@@ -6,27 +6,32 @@
 python scripts\ssh_manager.py connect -h 192.168.1.100 -p 22 -u root -w mypassword
 # -> a1b2c3d4-e5f6-7890-abcd-ef1234567890
 
-python scripts\ssh_manager.py exec -i a1b2c3d4-e5f6-7890-abcd-ef1234567890 "uname -a"
+python scripts\ssh_manager.py exec -i a1b2c3d4-... "uname -a"
 # OUT: Linux myserver 5.15.0-91-generic #101-Ubuntu SMP ... x86_64 GNU/Linux
 
-python scripts\ssh_manager.py exec -i a1b2c3d4-e5f6-7890-abcd-ef1234567890 "df -h /"
-# OUT: Filesystem      Size  Used Avail Use% Mounted on
-# OUT: /dev/sda1        98G   45G   53G  46% /
-
-python scripts\ssh_manager.py close -i a1b2c3d4-e5f6-7890-abcd-ef1234567890
+python scripts\ssh_manager.py close -i a1b2c3d4-...
 ```
 
 Omitting `-w` on an interactive terminal prompts for the password, so it never
 enters your shell history. `SSH_MANAGER_PASSWORD` is the non-interactive option.
+
+## Named sessions
+
+```powershell
+python scripts\ssh_manager.py connect -h 10.0.0.50 -u deploy --key --name prod-web
+python scripts\ssh_manager.py exec -i prod-web "systemctl status nginx"
+python scripts\ssh_manager.py sftp put -i prod-web .\nginx.conf /etc/nginx/nginx.conf
+python scripts\ssh_manager.py close -i prod-web
+```
+
+Names are unique per daemon; reusing one fails with exit code 2. `-i` accepts
+either the name or the UUID.
 
 ## Key authentication
 
 ```powershell
 # Explicit private key
 python scripts\ssh_manager.py connect -h 10.0.0.50 -u deploy --key ~/.ssh/id_ed25519
-
-# Encrypted key, passphrase on the command line
-python scripts\ssh_manager.py connect -h 10.0.0.50 -u deploy --key ~/.ssh/id_ed25519 --key-passphrase "s3cret"
 
 # Encrypted key, passphrase from the environment (recommended for scripts)
 $env:SSH_MANAGER_KEY_PASSPHRASE = "s3cret"
@@ -36,20 +41,15 @@ python scripts\ssh_manager.py connect -h 10.0.0.50 -u deploy --key ~/.ssh/id_ed2
 python scripts\ssh_manager.py connect -h 10.0.0.50 -u deploy --key
 ```
 
-With a terminal attached, an encrypted key with no passphrase prompts once and
-reuses the answer. Without a terminal the candidate is skipped and the next one
-is tried, so unattended runs never hang.
-
-## Host-key verification
-
-Strict verification is on by default.
+## Host-key verification and trust
 
 ```powershell
-# Unknown host -> refused, with the exact command to fix it
+# Unknown host -> refused, fingerprint printed, with the fix
 python scripts\ssh_manager.py connect -h 10.0.0.50 -u deploy --key
-# error: host key verification failed for 10.0.0.50:22. Add the host key to known_hosts, e.g.
-#   ssh-keyscan -p 22 10.0.0.50 >> ~/.ssh/known_hosts
-# or pass --known-hosts <file>, or explicitly disable the check with --no-host-key-check.
+# error: host key verification failed for 10.0.0.50:22. Re-run with --accept-host-key ...
+
+# Save the fingerprint and continue
+python scripts\ssh_manager.py connect -h 10.0.0.50 -u deploy --key --accept-host-key
 
 # Trust a project-local known_hosts instead
 python scripts\ssh_manager.py connect -h 10.0.0.50 -u deploy --key --known-hosts .\deploy_known_hosts
@@ -58,26 +58,89 @@ python scripts\ssh_manager.py connect -h 10.0.0.50 -u deploy --key --known-hosts
 python scripts\ssh_manager.py connect -h 10.0.0.50 -u deploy --key --no-host-key-check
 ```
 
+On an interactive terminal an unknown host prints the SHA256 fingerprint and
+asks for confirmation instead of failing. A *changed* host key is always
+rejected.
+
+## PTY and stdin
+
+```powershell
+# Commands that need a terminal (sudo prompt, top, less)
+python scripts\ssh_manager.py exec -i prod-web --pty "sudo -S id"
+python scripts\ssh_manager.py exec -i prod-web --pty --pty-size 120x40 "top -b -n1"
+
+# Feed local input to the remote command
+"hello world" | python scripts\ssh_manager.py exec -i prod-web --stdin "cat > /tmp/greeting"
+Get-Content .\dump.sql -Raw | python scripts\ssh_manager.py exec -i prod-web --stdin "mysql app"
+```
+
+With a PTY, stderr merges into stdout (that is how terminals work).
+
+## Background jobs
+
+```powershell
+# Start and get a job id immediately
+$job = python scripts\ssh_manager.py exec -i prod-web --bg "docker build -t app ." | Select-Object -Last 1
+
+# Inspect
+python scripts\ssh_manager.py jobs
+python scripts\ssh_manager.py logs $job --tail 50
+python scripts\ssh_manager.py logs $job --follow      # stream until it finishes
+
+# Stop it
+python scripts\ssh_manager.py kill $job
+```
+
+Output is buffered in memory (default 256 KB per job). Older output is dropped
+when the budget is exceeded, so `logs --tail` is the right way to inspect a
+noisy job. Jobs disappear when their session closes.
+
+## SFTP
+
+```powershell
+python scripts\ssh_manager.py sftp put   -i prod-web .\app.conf /etc/app/app.conf
+python scripts\ssh_manager.py sftp get   -i prod-web /var/log/app.log .\app.log
+python scripts\ssh_manager.py sftp ls    -i prod-web /etc/app
+python scripts\ssh_manager.py sftp stat  -i prod-web /etc/app/app.conf
+python scripts\ssh_manager.py sftp mkdir -i prod-web /etc/app/conf.d
+python scripts\ssh_manager.py sftp rm    -i prod-web /etc/app/old.conf
+```
+
+## JSON output
+
+```powershell
+python scripts\ssh_manager.py --json list
+# {"sessions": [{"id": "...", "name": "prod-web", "state": "alive", ...}]}
+
+python scripts\ssh_manager.py --json status
+# {"running": true, "pid": 1234, "port": 51234, "version": "2.1.0", "sessions": 1, "jobs": 0}
+
+# exec streams NDJSON, one object per line
+python scripts\ssh_manager.py --json exec -i prod-web "df -h"
+# {"type": "data", "stream": "stdout", "text": "Filesystem ...\n"}
+# {"type": "done", "exit_status": 0}
+```
+
 ## Multiple commands on one connection
 
 ```powershell
-$ID = python scripts\ssh_manager.py connect -h 10.0.0.50 -u deploy --key | Select-Object -Last 1
-python scripts\ssh_manager.py exec -i $ID "git pull"
-python scripts\ssh_manager.py exec -i $ID "npm run build"
-python scripts\ssh_manager.py exec -i $ID "systemctl restart app"
+python scripts\ssh_manager.py exec -i prod-web "git pull"
+python scripts\ssh_manager.py exec -i prod-web "npm run build"
+python scripts\ssh_manager.py exec -i prod-web "systemctl restart app"
 python scripts\ssh_manager.py list
-python scripts\ssh_manager.py close -i $ID
 ```
+
+Commands on one connection run concurrently (up to 10 by default), so parallel
+`exec` calls are fine and do not block each other.
 
 ## Long-running commands
 
 ```powershell
-# No output for minutes is fine: the daemon sends keepalive frames and the
-# session is not reaped while the command is in flight.
-python scripts\ssh_manager.py exec -i $ID "docker build -t app ."
+# No output for minutes is fine: keepalive frames keep the stream alive.
+python scripts\ssh_manager.py exec -i prod-web "docker build -t app ."
 
 # Bound the runtime instead
-python scripts\ssh_manager.py exec -i $ID -t 30 "sleep 300"
+python scripts\ssh_manager.py exec -i prod-web -t 30 "sleep 300"
 # ERR: [timeout after 30s]
 # Exit code: 124
 ```
@@ -95,6 +158,17 @@ python scripts\ssh_manager.py exec -i <id> "echo 中文测试"
 # OUT: 中文测试
 ```
 
+## Daemon logs
+
+```powershell
+python scripts\ssh_manager.py status
+python scripts\ssh_manager.py logs --daemon --tail 50
+python scripts\ssh_manager.py stop
+```
+
+The daemon log rotates at 1 MB keeping three backups, and records commands only
+as a length plus a SHA-256 prefix.
+
 ## CI/CD usage (non-interactive)
 
 ```powershell
@@ -110,27 +184,24 @@ python scripts\ssh_manager.py close -i $ID
 When the agent is asked to SSH into a server:
 
 ```markdown
-1. `connect -h <host> -p <port> -u <user> -w <password>` (or `--key [PATH]`) -> capture the ID
-2. Use `exec -i <id> "<command>"` for each command
+1. `connect -h <host> -p <port> -u <user> -w <password> --name <short>` (or `--key [PATH]`) -> capture the ID
+2. Use `exec -i <name> "<command>"` for each command; add `--json` for structured output
 3. Stream output: `OUT:` and `ERR:` prefixes distinguish stdout/stderr
-4. `close -i <id>` when done
-5. If the ID is missing, `list` to check, or `connect` again
-6. Host-key failure is expected for a new host: read the printed `ssh-keyscan`
-   hint, or use `--no-host-key-check` when the environment is trusted
-7. For Chinese servers, add `--encoding gbk` if output is garbled
+4. Use `--stdin` to feed input, `--pty` for terminal-only commands
+5. Use `exec --bg` + `logs --follow` for long jobs so you are not blocked
+6. Use `sftp put|get` to move files instead of shell redirection
+7. `close -i <name>` when done; `jobs` to see leftover background work
+8. Host-key failure is expected for a new host: re-run with `--accept-host-key`
+   when the environment is trusted
+9. For Chinese servers, add `--encoding gbk` if output is garbled
 ```
 
 ## Troubleshooting commands
 
 ```powershell
-# Check daemon health (pid, port, version, sessions)
 python scripts\ssh_manager.py status
-
-# Force stop and restart
-python scripts\ssh_manager.py stop
-python scripts\ssh_manager.py connect -h myserver -p 22 -u root -w pass
-
-# Clean up stale state
+python scripts\ssh_manager.py logs --daemon --tail 100
+python scripts\ssh_manager.py jobs
 python scripts\ssh_manager.py stop
 Remove-Item -Recurse ~\.ssh-manager\ -Force
 ```

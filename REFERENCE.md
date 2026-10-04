@@ -1,21 +1,23 @@
 # SSH Manager — Reference
 
-Version 2.0.0. The implementation is a package under `scripts/ssh_manager/`;
+Version 2.1.0. The implementation is a package under `scripts/ssh_manager/`;
 `scripts/ssh_manager.py` is a thin compatibility shim, so every command below
 keeps working exactly as before.
 
 ## CLI Reference
 
 ### Global
-All commands except `status`, `stop` and `daemon` auto-start the daemon on
-first use. `python -m ssh_manager <command>` works as an alternative entry point
-when run from `scripts/`.
+`--json` works before or after the subcommand. All commands except `status`,
+`stop`, `logs --daemon` and `daemon` auto-start the daemon on first use.
+`python -m ssh_manager <command>` works as an alternative entry point when run
+from `scripts/`.
 
 ### `connect`
 ```
 python scripts/ssh_manager.py connect -h <host> [-p <port>] -u <user>
        [-w <password>] [--key [PATH]] [--key-passphrase <text>]
-       [--known-hosts <file>] [--no-host-key-check] [--encoding auto]
+       [--known-hosts <file>] [--no-host-key-check] [--accept-host-key]
+       [--name <name>] [--encoding auto] [--json]
 ```
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
@@ -23,53 +25,98 @@ python scripts/ssh_manager.py connect -h <host> [-p <port>] -u <user>
 | `--port` | `-p` | `22` | SSH server port |
 | `--user` | `-u` | required | Login username |
 | `--password` | `-w` | env `SSH_MANAGER_PASSWORD`, else interactive prompt | Login password |
-| `--key` | | off | Enable public-key auth. `--key PATH` uses that private key; bare `--key` discovers `~/.ssh/id_ed25519`, `id_rsa`, `id_ecdsa` and allows `ssh-agent` |
-| `--key-passphrase` | | env `SSH_MANAGER_KEY_PASSPHRASE`, else interactive prompt | Passphrase for an encrypted private key |
-| `--known-hosts` | | none | Extra known_hosts file to trust (on top of the system file) |
+| `--key` | | off | Public-key auth. `--key PATH` uses that key; bare `--key` discovers `~/.ssh/id_ed25519`, `id_rsa`, `id_ecdsa` and allows `ssh-agent` |
+| `--key-passphrase` | | env `SSH_MANAGER_KEY_PASSPHRASE`, else interactive prompt | Passphrase for an encrypted key |
+| `--known-hosts` | | none | Extra known_hosts file to trust |
 | `--no-host-key-check` | | off | Disable host-key verification (insecure) |
-| `--encoding` | | `auto` | Encoding: `auto`, `utf-8`, `gbk`, `latin-1` |
+| `--accept-host-key` | | off | Save an unknown host key to known_hosts and continue |
+| `--name` | | none | Name the session; `-i` then accepts the name (`[A-Za-z0-9._-]{1,64}`) |
+| `--encoding` | | `auto` | `auto`, `utf-8`, `gbk`, `latin-1` |
 
-Prints the connection ID (UUID) on stdout on success. Exit code 0.
+Prints the connection ID on stdout (or a JSON object with `--json`).
+Exit code 0 on success, 1 on connect/auth/host-key failure, 2 for a duplicate or
+invalid name.
 
 Authentication order inside one SSH connection: **private key → ssh-agent →
-password**. Key auth is only attempted when `--key` is present; otherwise the
-manager behaves like v1 (`allow_agent=False`, `look_for_keys=False`).
+password**. Key auth is only attempted when `--key` is present.
 
 ### `exec` / `run`
 ```
-python scripts/ssh_manager.py exec -i <conn_id> "<command>" [-t <seconds>]
-python scripts/ssh_manager.py run  -i <conn_id> "<command>" [-t <seconds>]
+python scripts/ssh_manager.py exec -i <id|name> "<command>"
+       [-t <seconds>] [--pty] [--pty-size COLSxROWS] [--stdin] [--bg] [--json]
 ```
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--id` | `-i` | required | Connection ID from `connect` |
+| `--id` | `-i` | required | Connection ID or session name |
 | `--timeout` | `-t` | none | Kill the command after N seconds |
+| `--pty` | | off | Allocate a PTY (default 80x24); stderr merges into stdout |
+| `--pty-size` | | `80x24` | PTY size; implies `--pty` |
+| `--stdin` | | off | Stream local stdin to the remote command |
+| `--bg` | | off | Run in the background and print a job id |
 
-Streams output with `OUT:` and `ERR:` prefixes. Exits with the remote command's
-exit code. On timeout, prints `ERR: [timeout after Ns]` and exits 124.
+`--pty` is a boolean flag rather than an optional-value one on purpose: an
+optional value would swallow the command word (`--pty ls` would parse `ls` as
+the size). Use `--pty-size` for a custom size.
+
+Streams output with `OUT:` and `ERR:` prefixes, then exits with the remote exit
+code (124 on timeout). `--stdin` and `--bg` are mutually exclusive.
+
+### `jobs`
+```
+python scripts/ssh_manager.py jobs [--json]
+```
+Lists background jobs: job id, session, status (`running`/`done`/`failed`/
+`killed`), exit status, duration and command.
+
+### `logs`
+```
+python scripts/ssh_manager.py logs <job_id> [--follow] [--tail N] [--json]
+python scripts/ssh_manager.py logs --daemon [--tail N] [--json]
+```
+Reads a background job's buffered output, or the daemon log. `--follow` streams
+new output until the job finishes. Exactly one of `<job_id>` / `--daemon` is
+required.
+
+### `kill`
+```
+python scripts/ssh_manager.py kill <job_id> [--json]
+```
+Terminates a background job. (Sessions are closed with `close -i`.)
+
+### `sftp`
+```
+python scripts/ssh_manager.py sftp put   -i <id|name> <local> <remote> [--json]
+python scripts/ssh_manager.py sftp get   -i <id|name> <remote> <local> [--json]
+python scripts/ssh_manager.py sftp ls    -i <id|name> [path]           [--json]
+python scripts/ssh_manager.py sftp stat  -i <id|name> <path>           [--json]
+python scripts/ssh_manager.py sftp mkdir -i <id|name> <path>           [--json]
+python scripts/ssh_manager.py sftp rm    -i <id|name> <path>           [--json]
+```
+Each operation opens a short-lived SFTP channel on the existing session. `rm`
+removes a file or an empty directory.
 
 ### `close`
 ```
-python scripts/ssh_manager.py close -i <conn_id>
+python scripts/ssh_manager.py close -i <id|name> [--json]
 ```
-Closes the connection in the daemon. Exit code 0.
+Closes the connection and kills its background jobs.
 
 ### `list`
 ```
-python scripts/ssh_manager.py list
+python scripts/ssh_manager.py list [--json]
 ```
-Table of active connections: ID, user@host:port, connected_at (ISO-8601 local
-time), idle seconds.
+Table of ID, NAME, user@host:port, connected_at (ISO-8601 local), STATE
+(`alive`/`dead`) and idle seconds.
 
 ### `status`
 ```
-python scripts/ssh_manager.py status
+python scripts/ssh_manager.py status [--json]
 ```
-Shows daemon pid/port/version and the session count, or "not running".
+Daemon pid/port/version plus session and job counts, or "not running".
 
 ### `stop`
 ```
-python scripts/ssh_manager.py stop
+python scripts/ssh_manager.py stop [--json]
 ```
 Closes all connections and stops the daemon.
 
@@ -77,89 +124,106 @@ Closes all connections and stops the daemon.
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | Connect/auth failure, host-key verification failure, or fatal client error |
-| 2 | Bad connection ID, or usage error (e.g. no password and no `--key`) |
+| 1 | Connect/auth/host-key failure, SFTP failure, or fatal client error |
+| 2 | Bad connection id, unknown job, usage error, or duplicate/invalid session name |
 | 124 | Command timeout (`-t`) |
+
+## JSON output
+
+`--json` applies to every command. `connect`, `list`, `status`, `jobs`,
+`sftp *`, `logs <job>` (snapshot) and `kill` emit a single JSON object.
+`exec` and `logs --follow` emit **NDJSON** — one object per line — so streaming
+output stays parseable:
+
+```
+{"type": "data", "stream": "stdout", "text": "hello\n"}
+{"type": "done", "exit_status": 0}
+```
+
+Keepalive frames are transport-level and never appear in user output.
 
 ## Daemon Architecture
 
 ```
-CLI (ssh_manager.py connect/exec/...) ── TCP 127.0.0.1 ──► Daemon (ssh_manager daemon)
-                                                              │
-                                                              ├── Session A (paramiko SSHClient, host:port, last_activity, busy)
-                                                              ├── Session B
-                                                              └── Reaper thread (every <=60s: close idle > 30min, never while busy)
+CLI ── TCP 127.0.0.1 ──► Daemon
+                           ├── Session A  (paramiko SSHClient, semaphore of N channels)
+                           ├── Session B
+                           ├── JobRegistry (background jobs, in-memory ring buffers)
+                           └── Reaper (idle timeout + dead-transport eviction)
 ```
 
 - **Auto-start**: any client command spawns a detached daemon when none is
   running. Concurrent cold starts are serialized with `daemon.lock`
-  (`O_CREAT|O_EXCL`), so exactly one daemon wins; a lock older than 30s with no
-  live daemon is treated as stale and reclaimed.
-- **State file** (`~/.ssh-manager/daemon.json`): `port`, `pid`, `token`,
-  `version`, `keepalive_interval`, `started_at`. Written atomically
-  (temp file + `os.replace`); mode 0600 on POSIX.
-- **Token auth**: every request carries the token from the state file, so other
-  local processes cannot drive your SSH sessions.
-- **Frame limit**: protocol frames are capped at 16 MiB to protect the daemon
-  from a malformed local client.
-- **Per-connection lock**: commands on the same connection are serialized, so
-  output never interleaves.
-- **Keepalive**: while a command is running and produces no output, the daemon
-  sends `{"type":"keepalive"}` every `SSH_MANAGER_KEEPALIVE_INTERVAL` seconds
-  (default 30). The client ignores these frames and uses a read timeout of
-  3× the interval, so a genuinely wedged daemon is still detected.
-- **Idle timeout**: default 30 minutes (`SSH_MANAGER_IDLE_TIMEOUT` to override,
-  set before the daemon starts). Sessions with an in-flight command are never
-  reaped.
-- **Logs**: `~/.ssh-manager/daemon.log`. Passwords and passphrases are never
-  logged.
+  (`O_CREAT|O_EXCL`); a lock older than 30s with no live daemon is reclaimed.
+- **State file** (`~/.ssh-manager/daemon.json`): port, pid, token, version,
+  keepalive interval, max channels, started_at. Written atomically; mode 0600
+  on POSIX.
+- **Token auth**: every request carries the token from the state file.
+- **Frame limit**: protocol frames are capped at 16 MiB.
+- **Concurrency**: each command takes one slot from a per-session semaphore
+  (default 10, `SSH_MANAGER_MAX_CHANNELS`). Commands beyond the limit queue and
+  receive keepalive frames while waiting.
+- **Health**: the reaper probes `transport.is_active()` every ≤30s; a dead
+  transport is evicted so later commands fail fast with `session_dead`.
+- **Keepalive**: while a command produces no output, the daemon sends
+  `{"type":"keepalive"}` every `SSH_MANAGER_KEEPALIVE_INTERVAL` seconds
+  (default 30). The client uses a read timeout of 3× that interval.
+- **Idle timeout**: default 30 minutes (`SSH_MANAGER_IDLE_TIMEOUT`). Sessions
+  with active channels are never reaped.
+- **Logs**: `~/.ssh-manager/daemon.log`, rotated at 1 MB
+  (`SSH_MANAGER_LOG_MAX_KB`) keeping 3 backups. Commands are recorded as a
+  length + SHA-256 prefix, never in full.
+
+## Background Jobs
+
+`exec --bg` returns immediately with a job id. Output is buffered in memory in a
+ring buffer (default 256 KB per job, `SSH_MANAGER_JOB_BUFFER_KB`); when the
+budget is exceeded the oldest chunks are dropped. Finished jobs are kept for the
+lifetime of their session (at most 50 per session, oldest evicted). Closing a
+session kills and removes its jobs. Jobs live only as long as the daemon.
 
 ## Authentication & Host Keys
 
 - **Host keys**: strict verification against the system `known_hosts` plus any
-  `--known-hosts` file. Unknown hosts fail with the `ssh-keyscan` command you
-  need to run. `--no-host-key-check` switches to `AutoAddPolicy` for the
-  explicit opt-out case.
-- **Private keys**: `--key PATH` uses one file; bare `--key` tries
-  `id_ed25519`, then `id_rsa`, then `id_ecdsa` from `~/.ssh`.
+  `--known-hosts` file. Unknown hosts fail and report the SHA256 fingerprint;
+  `--accept-host-key` saves it (interactive terminals offer a y/N prompt
+  instead). A **changed** key is always rejected — no flag overrides it.
+  Accepted keys are appended to the file, so existing hashed entries survive.
+- **Private keys**: `--key PATH`, or bare `--key` to try `id_ed25519`, `id_rsa`,
+  `id_ecdsa` from `~/.ssh`.
 - **Passphrases**: `--key-passphrase` → `SSH_MANAGER_KEY_PASSPHRASE` →
-  interactive `getpass` prompt. With no terminal available, an encrypted
-  candidate is skipped (and reported) so the next candidate can be tried; if
-  none works the command fails with per-candidate reasons.
-- **Permissions**: on POSIX, a private key that is group/world readable
-  produces a warning suggesting `chmod 600`.
+  interactive prompt. Without a terminal, an encrypted candidate is skipped and
+  the next one is tried; if none works, the command fails with the reasons.
+- **Permissions**: on POSIX a group/world-readable private key produces a
+  warning suggesting `chmod 600`.
 
 ## Encoding Strategy
-
-The classic failure mode with SSH + CJK is a multi-byte character split across
-TCP packets. The decoder therefore locks its encoding once, at the head of the
-stream, instead of flipping mid-stream:
 
 1. Pure ASCII is emitted immediately and does not lock anything.
 2. When non-ASCII bytes appear, the buffer is decoded strictly as **UTF-8**.
    If UTF-8 is merely *incomplete* (a split multi-byte character), the decoder
-   keeps buffering — this is the common Linux case and is never mis-detected.
+   keeps buffering — the common Linux case is never mis-detected.
 3. If UTF-8 is definitively invalid, **GBK** is tried next.
-4. If both fail, **latin-1** is the last resort and cannot fail.
+4. If both fail, **latin-1** is the last resort.
 5. The undecided buffer is capped at 4 KiB; past the cap, UTF-8 with
    `errors="replace"` is locked.
 
-Pass `--encoding gbk` (or `utf-8`/`latin-1`) to skip detection entirely. The
-forced decoder is re-initialised for every command, so one command's encoding
-never leaks into the next.
-
-### Console output
-CLI stdout/stderr are set to UTF-8 with `errors="replace"` so CJK renders safely.
+Decoders are created per channel and per stream, so concurrent commands and
+interleaved stdout/stderr can never contaminate each other. Pass
+`--encoding gbk` (or `utf-8`/`latin-1`) to skip detection entirely.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| `host key verification failed` | Host not in known_hosts (strict default) | Run the printed `ssh-keyscan` command, pass `--known-hosts`, or `--no-host-key-check` |
-| `Authentication failed` | Wrong password/key, or the server rejects that method | Verify credentials; try `--key PATH`; note key-only servers reject password auth |
+| `host key verification failed` / `unknown_host` | Host not in known_hosts (strict default) | Re-run with `--accept-host-key`, run the printed `ssh-keyscan`, or `--known-hosts` |
+| `host key mismatch` | The server's key changed | Verify out-of-band, then remove the stale known_hosts entry |
+| `Authentication failed` | Wrong password/key, or the server rejects that method | Verify credentials; try `--key PATH` |
 | `no usable private key: ...` | Every candidate was encrypted and no passphrase was available | Pass `--key-passphrase` or set `SSH_MANAGER_KEY_PASSPHRASE` |
+| `session_dead` / `connection closed` | The transport died; the reaper evicted it | Reconnect |
+| `unknown job` | The job was removed (session closed, or pruned) | `jobs` to list what remains |
 | `Connection ID not found` | Session reaped (idle > 30 min) or never created | `list` to verify; reconnect |
-| Garbled Chinese text | Mixed-encoding stream that defeats detection | Pass `--encoding gbk` or `--encoding utf-8` explicitly |
+| Garbled Chinese text | Mixed-encoding stream that defeats detection | Pass `--encoding gbk` or `--encoding utf-8` |
 | `daemon unresponsive` | Daemon process wedged | `status` to check; `stop` then retry |
 | `paramiko` not found | Missing dependency | `pip install -r scripts/requirements.txt` |
 | Daemon won't start on Windows | Antivirus blocking port binding | Check `~/.ssh-manager/daemon.log` |
@@ -169,14 +233,16 @@ CLI stdout/stderr are set to UTF-8 with `errors="replace"` so CJK renders safely
 ```
 scripts/ssh_manager.py        compatibility shim (python scripts/ssh_manager.py ...)
 scripts/ssh_manager/
-    cli.py        argparse + command handlers
-    client.py     daemon client, auto-start, stream reading
-    daemon.py     daemon, exec engine, idle reaper
-    session.py    per-connection state
-    auth.py       host-key policy, key discovery, passphrases
+    cli.py        argparse + command handlers, JSON rendering
+    client.py     daemon client, auto-start, streaming, stdin pump
+    daemon.py     daemon, exec engine, reaper, job/sftp dispatch
+    session.py    per-connection state, channel semaphore
+    jobs.py       background jobs and their ring buffers
+    sftp.py       SFTP operations
+    auth.py       host-key policy, key discovery, fingerprints, known_hosts
     encoding.py   AdaptiveDecoder (stream-head locking)
     protocol.py   length-prefixed JSON framing
-    config.py     constants, env handling, state paths
-    errors.py     SSHConnectError, SessionError
+    config.py     constants, env handling, state paths, log rotation
+    errors.py     SSHConnectError, ConnectError, SessionError
 scripts/test_ssh_manager.py   self-contained test suite (fake SSH server)
 ```

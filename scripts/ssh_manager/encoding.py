@@ -33,6 +33,18 @@ def _try_decode(data, encoding):
         return None, "invalid"
 
 
+def make_stream_decoders(encoding=None):
+    """Fresh per-channel decoders: stdout and stderr are independent streams.
+
+    Each channel of each command gets its own pair, so concurrent commands on
+    one connection can never contaminate each other's encoding decision.
+    """
+    return {
+        "stdout": AdaptiveDecoder(encoding=encoding),
+        "stderr": AdaptiveDecoder(encoding=encoding),
+    }
+
+
 class AdaptiveDecoder(object):
     """Incremental decoder: UTF-8 first, then GBK, then latin-1.
 
